@@ -347,11 +347,23 @@
 
         // Find confirmation code
         var confCode = '';
-        var confMatch = fullText.match(/(?:confirmation|conf\.?)\s*(?:code|#|number)?\s*(?:is\s+)?([A-Z]{6})/i);
-        if (confMatch) confCode = confMatch[1];
-        if (!confCode) {
-            var pnrMatch = fullText.match(/(?:PNR|record\s+locator|booking\s+code)[:\s]+([A-Z0-9]{5,8})/i);
-            if (pnrMatch) confCode = pnrMatch[1];
+        var confPatterns = [
+            /(?:confirmation|conf\.?)\s*(?:code|#|number)?\s*(?:is\s+)?([A-Z]{6})/i,
+            /(?:PNR|record\s+locator|booking\s+code)[:\s]+([A-Z0-9]{5,8})/i,
+            // JetBlue uses "Booking Code" or just shows it prominently
+            /booking\s*code[:\s]+([A-Z0-9]{5,8})/i,
+            // Look for standalone 6-char alphanumeric codes near "JetBlue" or flight keywords
+            /\b([A-Z]{6})\b(?=.*(?:flight|itinerary|reservation))/i,
+            // Code appearing after airline name
+            /(?:JetBlue|Delta|United|American|Southwest|Alaska|Spirit|Frontier)\s+(?:Airways?|Airlines?)?\s*[:\-]?\s*([A-Z]{6})/i
+        ];
+
+        for (var cp = 0; cp < confPatterns.length; cp++) {
+            var confMatch = fullText.match(confPatterns[cp]);
+            if (confMatch) {
+                confCode = confMatch[1];
+                break;
+            }
         }
 
         // Pattern: "XXX YYY Flight NNNN" or "XXX ► YYY Flight NNNN"
@@ -690,24 +702,27 @@
 
         // --- Extract confirmation/booking number ---
         // Look for "BOOKING NUMBER: 6084649709-1-LAS" or similar patterns
+        // The La Samanna PDF has "BOOKING NUMBER" followed by the actual number
         var confPatterns = [
-            /booking\s*(?:#|number|no\.?)?[:\s]+([A-Z0-9\-]{6,25})/i,
-            /confirmation\s*(?:#|number|no\.?|code)?[:\s]+([A-Z0-9\-]{6,25})/i,
-            /reservation\s*(?:#|number|no\.?)?[:\s]+([A-Z0-9\-]{6,25})/i,
-            /(?:conf|ref)\.?\s*(?:#|number|code)?[:\s]+([A-Z0-9\-]{6,25})/i
+            // Exact "BOOKING NUMBER" pattern (La Samanna/Belmond style)
+            /BOOKING\s+NUMBER[:\s]+([A-Z0-9\-]{6,25})/i,
+            // Generic patterns
+            /booking\s*(?:#|no\.?)[:\s]+([A-Z0-9\-]{6,25})/i,
+            /confirmation\s*(?:#|no\.?|code)[:\s]+([A-Z0-9\-]{6,25})/i,
+            /reservation\s*(?:#|no\.?)[:\s]+([A-Z0-9\-]{6,25})/i,
+            /(?:conf|ref)\.?\s*(?:#|code)[:\s]+([A-Z0-9\-]{6,25})/i
         ];
 
         for (var cp = 0; cp < confPatterns.length; cp++) {
             var cm = fullText.match(confPatterns[cp]);
             if (cm) {
                 var confNum = cm[1].trim();
-                // Skip if it matched a word like "CONFIRMATION" or "DETAILS"
-                if (!/^[A-Z]+$/i.test(confNum) || confNum.length > 12) {
-                    // Must contain at least one digit to be a real confirmation number
-                    if (/\d/.test(confNum)) {
-                        result.notes = 'Confirmation: ' + confNum;
-                        break;
-                    }
+                // Must contain at least one digit to be a real confirmation number
+                // Also skip common words that might be captured
+                var skipWords = ['CONFIRMATION', 'BOOKING', 'RESERVATION', 'NUMBER', 'DETAILS', 'CODE'];
+                if (skipWords.indexOf(confNum.toUpperCase()) === -1 && /\d/.test(confNum)) {
+                    result.notes = 'Confirmation: ' + confNum;
+                    break;
                 }
             }
         }
