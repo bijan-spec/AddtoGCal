@@ -303,6 +303,12 @@
             return flightEvents;
         }
 
+        // Second, try hotel reservation parsing
+        var hotelEvent = parseHotelReservation(rawText);
+        if (hotelEvent) {
+            return [hotelEvent];
+        }
+
         // Then try generic splitting
         var blocks = splitIntoEventBlocks(rawText);
         var events = [];
@@ -350,10 +356,12 @@
 
         // Pattern: "XXX YYY Flight NNNN" or "XXX ► YYY Flight NNNN"
         // Also handles "BOS  SXM  Flight 1977" with varied whitespace/symbols
-        var flightSegmentRegex = /([A-Z]{3})\s*[►▶→\-–—to>]?\s*([A-Z]{3})\s+Flight\s+(\d{3,5})/gi;
+        // Updated to handle more Unicode arrows and flexible whitespace
+        var flightSegmentRegex = /([A-Z]{3})\s*[►▶→▸▷➤➜➔➙>\-–—]?\s*([A-Z]{3})\s+Flight\s+(\d{3,5})/gi;
         var segMatch;
         var segments = [];
 
+        // First pass: try the standard pattern
         while ((segMatch = flightSegmentRegex.exec(fullText)) !== null) {
             segments.push({
                 origin: segMatch[1],
@@ -361,6 +369,57 @@
                 flightNum: segMatch[3],
                 index: segMatch.index
             });
+        }
+
+        // Second pass: if not enough segments found, try alternate JetBlue PDF format
+        // JetBlue PDFs often have "Flight NNNN" on a separate line after airport codes
+        if (segments.length < 2) {
+            segments = [];
+            // Look for "XXX YYY" followed by "Flight NNNN" within nearby text
+            // This pattern: airport codes on one line, "Flight" nearby
+            var airportPairRegex = /([A-Z]{3})\s+([A-Z]{3})\b/g;
+            var flightNumRegex = /Flight\s+(\d{3,5})/gi;
+
+            var airportPairs = [];
+            var apMatch;
+            while ((apMatch = airportPairRegex.exec(fullText)) !== null) {
+                // Skip if this looks like something else (e.g., "USA NYC")
+                var orig = apMatch[1];
+                var dest = apMatch[2];
+                // Common airport codes - basic validation
+                airportPairs.push({
+                    origin: orig,
+                    dest: dest,
+                    index: apMatch.index
+                });
+            }
+
+            var flightNums = [];
+            var fnMatch;
+            while ((fnMatch = flightNumRegex.exec(fullText)) !== null) {
+                flightNums.push({
+                    num: fnMatch[1],
+                    index: fnMatch.index
+                });
+            }
+
+            // Match airport pairs with nearby flight numbers (within 100 chars)
+            for (var ap = 0; ap < airportPairs.length; ap++) {
+                var pair = airportPairs[ap];
+                for (var fn = 0; fn < flightNums.length; fn++) {
+                    var flight = flightNums[fn];
+                    var distance = flight.index - pair.index;
+                    if (distance > 0 && distance < 100) {
+                        segments.push({
+                            origin: pair.origin,
+                            dest: pair.dest,
+                            flightNum: flight.num,
+                            index: pair.index
+                        });
+                        break;
+                    }
+                }
+            }
         }
 
         // Deduplicate segments (same flight number appears multiple times in these PDFs)
@@ -439,6 +498,226 @@
         }
 
         return events;
+    }
+
+    // --- Hotel Reservation Parser ---
+    // Detects CHECK IN / CHECK OUT patterns common in hotel confirmations
+    function parseHotelReservation(rawText) {
+        var fullText = rawText;
+
+        // Look for CHECK IN and CHECK OUT patterns
+        var hasCheckIn = /check[\s\-]?in/i.test(fullText);
+        var hasCheckOut = /check[\s\-]?out/i.test(fullText);
+
+        // Also look for hotel-related keywords
+        var hotelKeywords = /\b(hotel|resort|inn|suites?|lodge|reservation|booking\s+confirmation|room\s+type|room:|nights?:?|guest\s+name)/i;
+        var hasHotelKeywords = hotelKeywords.test(fullText);
+
+        // Must have both check-in/out AND hotel keywords to be treated as hotel reservation
+        if (!hasCheckIn || !hasCheckOut || !hasHotelKeywords) {
+            return null;
+        }
+
+        var result = {
+            name: '',
+            date: '',
+            endDate: '',
+            startTime: '',
+            endTime: '',
+            location: '',
+            notes: ''
+        };
+
+        // --- Extract hotel/property name ---
+        // Look for "LA SAMANNA" style headers or "Hotel Name - Your booking" patterns
+        var hotelNamePatterns = [
+            // "LA SAMANNA" - all caps hotel name on its own line (Belmond style)
+            /^([A-Z][A-Z\s]{2,})$/m,
+            // "La Samanna - Your booking confirmation"
+            /([A-Za-z][A-Za-z\s&']+)\s*[-–—]\s*(?:Your\s+)?(?:booking|reservation)/i,
+            // "Hotel Name" ending with hotel-type word
+            /^([A-Z][A-Za-z\s&']+(?:Hotel|Resort|Inn|Suites?|Lodge))/m,
+            // From subject line: "Subject: La Samanna Reservation Confirmation"
+            /Subject[:\s]+(?:Fwd:\s*|Re:\s*)?([A-Za-z][A-Za-z\s&']+?)(?:\s+Reservation|\s+Confirmation|\s+Booking)/i
+        ];
+
+        for (var hp = 0; hp < hotelNamePatterns.length; hp++) {
+            var hm = fullText.match(hotelNamePatterns[hp]);
+            if (hm) {
+                var candidateName = hm[1].trim();
+                // Skip if it's too short or looks like junk
+                if (candidateName.length < 3) continue;
+                // Skip common false positives
+                if (/^(BOOKING|RESERVATION|CONFIRMATION|DETAILS|GUEST|CHECK|ROOM|HOTEL)$/i.test(candidateName)) continue;
+                // Skip if it contains numbers (likely not a hotel name)
+                if (/\d/.test(candidateName)) continue;
+
+                result.name = candidateName;
+                break;
+            }
+        }
+
+        // Clean up the name
+        if (result.name) {
+            // Remove trailing "A BELMOND HOTEL" etc if present
+            result.name = result.name.replace(/\s+A\s+BELMOND.*$/i, '').trim();
+            // Limit length
+            if (result.name.length > 40) {
+                result.name = result.name.substring(0, 40).trim();
+            }
+        }
+
+        // Add "Stay" suffix
+        if (result.name) {
+            if (!/hotel|resort|inn|suites?|lodge|stay/i.test(result.name)) {
+                result.name = result.name + ' Stay';
+            }
+        }
+
+        // --- Extract CHECK-IN and CHECK-OUT dates ---
+        // Belmond PDFs have format: "CHECK IN: ," and "CHECK OUT: ," with dates appearing later
+        // like "SUNDAY 08 FEB 2026" and "SATURDAY 14 FEB 2026"
+        // Strategy: Find all dates with day names, first one is check-in, second is check-out
+
+        var dayDatePattern = /(?:SUNDAY|MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY)[,\s]+(\d{1,2})\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{4})/gi;
+        var allDayDates = [];
+        var dayMatch;
+        while ((dayMatch = dayDatePattern.exec(fullText)) !== null) {
+            allDayDates.push({
+                day: parseInt(dayMatch[1], 10),
+                month: dayMatch[2],
+                year: parseInt(dayMatch[3], 10),
+                index: dayMatch.index
+            });
+        }
+
+        // If we found day-prefixed dates (like "SUNDAY 08 FEB 2026"), use first for check-in, second for check-out
+        if (allDayDates.length >= 2) {
+            var ciMonth = MONTHS[allDayDates[0].month.toLowerCase().substring(0, 3)];
+            result.date = formatDateISO(allDayDates[0].year, ciMonth, allDayDates[0].day);
+
+            var coMonth = MONTHS[allDayDates[1].month.toLowerCase().substring(0, 3)];
+            result.endDate = formatDateISO(allDayDates[1].year, coMonth, allDayDates[1].day);
+        } else if (allDayDates.length === 1) {
+            var ciMonth2 = MONTHS[allDayDates[0].month.toLowerCase().substring(0, 3)];
+            result.date = formatDateISO(allDayDates[0].year, ciMonth2, allDayDates[0].day);
+        }
+
+        // Fallback: try standard patterns if day-prefixed dates not found
+        if (!result.date) {
+            var checkInPatterns = [
+                /check[\s\-]?in[:\s]+(?:[A-Za-z]+,?\s*)?(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})/i,
+                /check[\s\-]?in[:\s]+(?:[A-Za-z]+,?\s*)?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})/i,
+                /check[\s\-]?in[:\s]+(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/i
+            ];
+
+            for (var ci = 0; ci < checkInPatterns.length; ci++) {
+                var cim = fullText.match(checkInPatterns[ci]);
+                if (cim) {
+                    if (ci === 0) {
+                        var ciMonth3 = MONTHS[cim[2].toLowerCase().substring(0, 3)];
+                        result.date = formatDateISO(parseInt(cim[3], 10), ciMonth3, parseInt(cim[1], 10));
+                    } else if (ci === 1) {
+                        var ciMonth4 = MONTHS[cim[1].toLowerCase().substring(0, 3)];
+                        result.date = formatDateISO(parseInt(cim[3], 10), ciMonth4, parseInt(cim[2], 10));
+                    } else {
+                        var yr = parseInt(cim[3], 10);
+                        if (yr < 100) yr += 2000;
+                        result.date = formatDateISO(yr, parseInt(cim[1], 10) - 1, parseInt(cim[2], 10));
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (!result.endDate) {
+            var checkOutPatterns = [
+                /check[\s\-]?out[:\s]+(?:[A-Za-z]+,?\s*)?(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})/i,
+                /check[\s\-]?out[:\s]+(?:[A-Za-z]+,?\s*)?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})/i,
+                /check[\s\-]?out[:\s]+(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/i
+            ];
+
+            for (var co = 0; co < checkOutPatterns.length; co++) {
+                var com = fullText.match(checkOutPatterns[co]);
+                if (com) {
+                    if (co === 0) {
+                        var coMonth2 = MONTHS[com[2].toLowerCase().substring(0, 3)];
+                        result.endDate = formatDateISO(parseInt(com[3], 10), coMonth2, parseInt(com[1], 10));
+                    } else if (co === 1) {
+                        var coMonth3 = MONTHS[com[1].toLowerCase().substring(0, 3)];
+                        result.endDate = formatDateISO(parseInt(com[3], 10), coMonth3, parseInt(com[2], 10));
+                    } else {
+                        var yr2 = parseInt(com[3], 10);
+                        if (yr2 < 100) yr2 += 2000;
+                        result.endDate = formatDateISO(yr2, parseInt(com[1], 10) - 1, parseInt(com[2], 10));
+                    }
+                    break;
+                }
+            }
+        }
+
+        // --- Extract check-in TIME ---
+        var checkInTimeMatch = fullText.match(/check[\s\-]?in\s+time[:\s]+(\d{1,2}:\d{2})\s*(AM|PM)?/i);
+        if (checkInTimeMatch) {
+            result.startTime = checkInTimeMatch[2]
+                ? convertTo24Hour(checkInTimeMatch[1], checkInTimeMatch[2])
+                : checkInTimeMatch[1];
+        }
+
+        // --- Extract location ---
+        // Look for address patterns or location fields
+        var locationPatterns = [
+            /(?:address|location)[:\s]+([^\n]+)/i,
+            /(\d+\s+[A-Za-z\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr)[^\n]*)/i,
+            /([A-Za-z\s]+,\s*[A-Z]{2}\s+\d{5})/  // City, ST ZIP
+        ];
+
+        for (var lp = 0; lp < locationPatterns.length; lp++) {
+            var lm = fullText.match(locationPatterns[lp]);
+            if (lm) {
+                result.location = lm[1].trim();
+                break;
+            }
+        }
+
+        // If no address found, use hotel name + any city/region mentioned
+        if (!result.location && result.name) {
+            var cityMatch = fullText.match(/\b(St\.?\s*Martin|Saint\s*Martin|French\s*West\s*Indies|[A-Z][a-z]+,\s*[A-Z]{2})\b/i);
+            if (cityMatch) {
+                result.location = result.name.replace(/\s*(?:Hotel\s*)?Stay$/i, '') + ', ' + cityMatch[1];
+            }
+        }
+
+        // --- Extract confirmation/booking number ---
+        // Look for "BOOKING NUMBER: 6084649709-1-LAS" or similar patterns
+        var confPatterns = [
+            /booking\s*(?:#|number|no\.?)?[:\s]+([A-Z0-9\-]{6,25})/i,
+            /confirmation\s*(?:#|number|no\.?|code)?[:\s]+([A-Z0-9\-]{6,25})/i,
+            /reservation\s*(?:#|number|no\.?)?[:\s]+([A-Z0-9\-]{6,25})/i,
+            /(?:conf|ref)\.?\s*(?:#|number|code)?[:\s]+([A-Z0-9\-]{6,25})/i
+        ];
+
+        for (var cp = 0; cp < confPatterns.length; cp++) {
+            var cm = fullText.match(confPatterns[cp]);
+            if (cm) {
+                var confNum = cm[1].trim();
+                // Skip if it matched a word like "CONFIRMATION" or "DETAILS"
+                if (!/^[A-Z]+$/i.test(confNum) || confNum.length > 12) {
+                    // Must contain at least one digit to be a real confirmation number
+                    if (/\d/.test(confNum)) {
+                        result.notes = 'Confirmation: ' + confNum;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Only return if we found at least a check-in date
+        if (result.date) {
+            return result;
+        }
+
+        return null;
     }
 
     // --- Generic Block Splitter ---
