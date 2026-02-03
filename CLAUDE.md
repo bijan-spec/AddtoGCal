@@ -23,6 +23,10 @@ A web app that extracts event details from screenshots, PDFs, or pasted text and
 - PDF text extraction using PDF.js v3 (with OCR fallback for scanned PDFs)
 - Smart text parsing extracts: event name, date, start/end time, location, confirmation numbers
 
+### Specialized Parsers
+- **Flight itinerary parser** - Detects airlines (JetBlue, Delta, United, etc.), extracts flight numbers, routes, and confirmation codes
+- **Hotel reservation parser** - Detects CHECK IN/CHECK OUT patterns, extracts booking numbers, handles Belmond-style PDFs
+
 ### Multi-Event Support
 - Detects multiple events in a single screenshot/PDF (e.g., round-trip flights)
 - Dedicated flight itinerary parser for airlines (JetBlue, Delta, United, etc.)
@@ -61,6 +65,14 @@ A web app that extracts event details from screenshots, PDFs, or pasted text and
 
 ## Version History
 
+### v.4 (February 2026)
+- Added dedicated hotel reservation parser (CHECK IN/CHECK OUT detection)
+- Improved JetBlue PDF parsing with alternate airport code detection
+- Fixed confirmation number extraction for hotels (BOOKING NUMBER pattern)
+- Added support for day-prefixed dates (e.g., "SUNDAY 08 FEB 2026")
+- Better filtering of false positives in confirmation number detection
+- Hotel name extraction from all-caps headers (Belmond-style PDFs)
+
 ### v.3 (February 2026)
 - Added paste text option (skip OCR, paste confirmation text directly)
 - Added end date field for multi-day events (hotels, conferences)
@@ -83,6 +95,15 @@ A web app that extracts event details from screenshots, PDFs, or pasted text and
 ## Deployment
 - GitHub repo: https://github.com/bijan-spec/AddtoGCal
 - Hosted on GitHub Pages: https://bijan-spec.github.io/AddtoGCal/
+
+## Known Working PDFs
+- **JetBlue flight confirmations** - Round-trip flights, confirmation codes
+- **Belmond hotel reservations** (La Samanna) - CHECK IN/CHECK OUT with day-prefixed dates, BOOKING NUMBER
+
+## Parsing Order
+1. Flight itinerary parser (if 2+ flight segments detected)
+2. Hotel reservation parser (if CHECK IN/OUT + hotel keywords detected)
+3. Generic date-based block splitter (fallback)
 
 ## Owner
 Built by @bijan (instagram.com/bijan)
